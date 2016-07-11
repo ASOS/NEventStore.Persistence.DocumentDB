@@ -1,0 +1,34 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio 14
+VisualStudioVersion = 14.0.25123.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NEventStore.Persistence.DocumentDB", "NEventstore.Persistence.DocumentDB\NEventStore.Persistence.DocumentDB.csproj", "{DA266FC8-6BF6-4FB6-8337-0636F69FA6DB}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NEventStore.Persistence.DocumentDB.Tests", "NEventStore.Persistence.DocumentDB.Tests\NEventStore.Persistence.DocumentDB.Tests.csproj", "{9A93A33B-65A4-42D0-BC9A-B6AC401F3376}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NEventStore.Persistence.AcceptanceTests", "..\NEventStore\NEventStore.Persistence.MongoDB\dependencies\NEventStore\src\NEventStore.Persistence.AcceptanceTests\NEventStore.Persistence.AcceptanceTests.csproj", "{3FE594FE-16FF-4405-97D5-5A58FB12520B}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{DA266FC8-6BF6-4FB6-8337-0636F69FA6DB}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{DA266FC8-6BF6-4FB6-8337-0636F69FA6DB}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{DA266FC8-6BF6-4FB6-8337-0636F69FA6DB}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{DA266FC8-6BF6-4FB6-8337-0636F69FA6DB}.Release|Any CPU.Build.0 = Release|Any CPU
+		{9A93A33B-65A4-42D0-BC9A-B6AC401F3376}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{9A93A33B-65A4-42D0-BC9A-B6AC401F3376}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{9A93A33B-65A4-42D0-BC9A-B6AC401F3376}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{9A93A33B-65A4-42D0-BC9A-B6AC401F3376}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3FE594FE-16FF-4405-97D5-5A58FB12520B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3FE594FE-16FF-4405-97D5-5A58FB12520B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3FE594FE-16FF-4405-97D5-5A58FB12520B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3FE594FE-16FF-4405-97D5-5A58FB12520B}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

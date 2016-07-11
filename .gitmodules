@@ -1,0 +1,3 @@
+[submodule "Dependencies/NEventStore"]
+	path = Dependencies/NEventStore
+	url = git@github.com:NEventStore/NEventStore.git
