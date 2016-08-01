@@ -13,7 +13,6 @@
     public class DocumentPersistenceEngine : IPersistStreams
     {
         private static readonly ILog Logger = LogFactory.BuildLogger(typeof(DocumentPersistenceEngine));
-        private bool disposed;
 
         private readonly Func<long> getLastCheckPointNumber;
         private readonly Func<LongCheckpoint> getNextCheckPointNumber;
@@ -56,10 +55,7 @@
 
         public DocumentPersistenceOptions Options { get; private set; }
 
-        public bool IsDisposed
-        {
-            get { return this.disposed; }
-        }
+        public bool IsDisposed { get; private set; }
 
         public void Initialize()
         {
@@ -226,14 +222,14 @@
 
         protected virtual void Dispose(bool disposing)
         {
-            if (!disposing || this.disposed)
+            if (!disposing || this.IsDisposed)
             {
                 return;
             }
 
             Logger.Debug(Messages.ShuttingDownPersistence);
             this.Client.Dispose();
-            this.disposed = true;
+            this.IsDisposed = true;
         }
 
         public ICommit Commit(CommitAttempt attempt)
@@ -351,7 +347,7 @@
 
         protected virtual void TryExecute(Action callback)
         {
-            if (this.disposed)
+            if (this.IsDisposed)
             {
                 throw new ObjectDisposedException("Attempt to use storage after it has been disposed.");
             }
