@@ -72,6 +72,7 @@
     <Compile Include="PersistenceEngineFixture.cs" />
     <Compile Include="PersistenceTests.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="DocumentDbUniqueConstraintTests.cs" />
     <Compile Include="TestingPersistenceFactory.cs" />
   </ItemGroup>
   <ItemGroup>

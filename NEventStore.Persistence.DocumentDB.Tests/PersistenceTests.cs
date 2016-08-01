@@ -5,6 +5,7 @@ namespace NEventStore.Persistence.AcceptanceTests
     using System;
     using System.Collections.Generic;
     using System.Linq;
+    using System.Threading;
 
     using NEventStore.Diagnostics;
     using NEventStore.Persistence.AcceptanceTests.BDD;
@@ -750,6 +751,7 @@ namespace NEventStore.Persistence.AcceptanceTests
                 this.Persistence.Drop();
                 this.Persistence.Dispose();
             }
+
             this.Persistence = new PerformanceCounterPersistenceEngine(this.createPersistence(), "tests");
             this.Persistence.Initialize();
         }
@@ -761,6 +763,7 @@ namespace NEventStore.Persistence.AcceptanceTests
             if (this.Persistence != null && !this.Persistence.IsDisposed)
             {
                 this.Persistence.Drop();
+                Thread.Sleep(500);
                 this.Persistence.Dispose();
             }
         }

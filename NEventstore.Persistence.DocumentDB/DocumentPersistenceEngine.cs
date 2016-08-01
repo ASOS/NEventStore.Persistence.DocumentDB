@@ -8,6 +8,7 @@
     using Microsoft.Azure.Documents.Client;
 
     using NEventStore.Logging;
+    using NEventStore.Persistence.DocumentDB.Constraints;
     using NEventStore.Serialization;
 
     public class DocumentPersistenceEngine : IPersistStreams
@@ -65,22 +66,27 @@
             this.EnsureCollectionExists(collections, this.Options.StreamHeadCollectionName);
             this.EnsureCollectionExists(collections, this.Options.SnapshotCollectionName);
 
-            var logicalKeyConstraint = new Trigger
+            var getFromConstraint = new Trigger
             {
-                Id = "LogicalKey_Constraint",
-                AltLink = "LogicalKey_Constraint",
-                ResourceId = "LogicalKey_Constraint",
-                TriggerOperation = TriggerOperation.Create,
+                Id = "GetFrom_Constraint",
+                AltLink = "GetFrom_Constraint",
+                ResourceId = "GetFrom_Constraint",
+                TriggerOperation = TriggerOperation.All,
                 TriggerType = TriggerType.Pre,
-                Body = UniqueConstraintScripts.Logical_Key
+                Body = new DocumentDbUniqueConstraint(new[] { "BucketId", "StreamId", "StartingStreamRevision", "StreamRevision" }).TransformText()
             };
 
-            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), logicalKeyConstraint, new RequestOptions());
+            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), getFromConstraint, new RequestOptions());
         }
 
         public void Drop()
         {
-            this.Purge();
+            this.TryExecute(() =>
+            {
+                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName)).GetAwaiter().GetResult();
+                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName)).GetAwaiter().GetResult();
+                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName)).GetAwaiter().GetResult();
+            });
         }
 
         public void DeleteStream(string bucketId, string streamId)
@@ -240,12 +246,13 @@
                 try
                 {
                     var doc = attempt.ToDocumentCommit(this.getNextCheckPointNumber());
+
                     var requestOptions = new RequestOptions
                     {
-                        PreTriggerInclude = new List<string>
-                            {
-                                "LogicalKey_Constraint"
-                            }
+                        PreTriggerInclude = new[]
+                        {
+                            "GetFrom_Constraint"
+                        }
                     };
 
                     this.Client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), doc, requestOptions).GetAwaiter().GetResult();
@@ -255,7 +262,7 @@
 
                     return doc.ToCommit();
                 }
-                catch (DocumentClientException)
+                catch (DocumentClientException e)
                 {
                     var savedCommit = this.LoadSavedCommit(attempt);
 
