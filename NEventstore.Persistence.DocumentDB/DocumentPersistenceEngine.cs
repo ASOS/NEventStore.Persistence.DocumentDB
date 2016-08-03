@@ -76,7 +76,18 @@
                 Body = new DocumentDbUniqueConstraint(new[] { "BucketId", "StreamId", "StartingStreamRevision", "StreamRevision" }).TransformText()
             };
 
-            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), getFromConstraint, new RequestOptions());
+            var checkPointConstraint = new Trigger
+            {
+                Id = "CheckPoint_Constraint",
+                AltLink = "CheckPoint_Constraint",
+                ResourceId = "CheckPoint_Constraint",
+                TriggerOperation = TriggerOperation.All,
+                TriggerType = TriggerType.Pre,
+                Body = new DocumentDbUniqueConstraint(new[] { "CheckpointNumber" }).TransformText()
+            };
+
+            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), getFromConstraint);
+            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), checkPointConstraint);
         }
 
         public void Drop()
@@ -251,7 +262,8 @@
                     {
                         PreTriggerInclude = new[]
                         {
-                            "GetFrom_Constraint"
+                            "GetFrom_Constraint",
+                            "CheckPoint_Constraint"
                         }
                     };
 
