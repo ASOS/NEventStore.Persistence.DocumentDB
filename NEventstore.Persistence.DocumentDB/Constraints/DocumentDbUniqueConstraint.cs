@@ -87,10 +87,22 @@ namespace NEventStore.Persistence.DocumentDB.Constraints
                     "NFLICT if there is another doc with this id already.\r\n        let isAccepted = _" +
                     "_.createDocument(__.getSelfLink(), metaDoc, {}, function (err, body, options) {\r" +
                     "\n            if (err) {\r\n                if (err.number == ERROR_CODE.CONFLICT) " +
-                    "throw new Error(err.number, \"Unique constraint for properties (\'StreamId\', \'Buck" +
-                    "etId\', \'CommitSequence\') failed: (\" + err.number + \"): \" + err.message);\r\n      " +
-                    "          else throw err;\r\n            };\r\n        });\r\n        checkAccepted(is" +
-                    "Accepted);\r\n    }\r\n\r\n    function generateUniqueIdValue(doc) {\r\n        return ");
+                    "throw new Error(err.number, \"");
+            
+            #line 107 "G:\1. Projects\1. GIT Hosted\NEventstore.Persistence.DocumentDB\NEventstore.Persistence.DocumentDB\Constraints\DocumentDbUniqueConstraint.tt"
+            this.Write(this.ToStringHelper.ToStringWithCulture(this.ErrorCode));
+            
+            #line default
+            #line hidden
+            this.Write(@" - Unique constraint for properties ('StreamId', 'BucketId', 'CommitSequence') failed: ("" + err.number + ""): "" + err.message);
+                else throw err;
+            };
+        });
+        checkAccepted(isAccepted);
+    }
+
+    function generateUniqueIdValue(doc) {
+        return ");
             
             #line 115 "G:\1. Projects\1. GIT Hosted\NEventstore.Persistence.DocumentDB\NEventstore.Persistence.DocumentDB\Constraints\DocumentDbUniqueConstraint.tt"
             this.Write(this.ToStringHelper.ToStringWithCulture(this.ConcatenatePropertyNames()));

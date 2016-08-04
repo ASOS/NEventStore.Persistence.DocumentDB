@@ -12,13 +12,11 @@
         [Fact]
         public void ShouldConcatenatePropertiesCorrectly()
         {
-            var constraint = new DocumentDbUniqueConstraint(new []{ "PropertyOne", "PropertyTwo", "PropertyThree" });
+            var constraint = new DocumentDbUniqueConstraint(new []{ "PropertyOne", "PropertyTwo", "PropertyThree" }, "[CustomError]");
 
             var result = constraint.ConcatenatePropertyNames();
             
-
             result.ShouldBe("\"__uniqueConstraint\" + \"_\" + doc[\"PropertyOne\"] + \"_\" + doc[\"PropertyTwo\"] + \"_\" + doc[\"PropertyThree\"]");
-
             Trace.WriteLine(constraint.TransformText());
         }
     }

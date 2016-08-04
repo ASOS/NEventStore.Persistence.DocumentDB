@@ -104,7 +104,7 @@ function CommitsLogicalKey_Constraint() {
         // This will result in ERROR_CODE.CONFLICT if there is another doc with this id already.
         let isAccepted = __.createDocument(__.getSelfLink(), metaDoc, {}, function (err, body, options) {
             if (err) {
-                if (err.number == ERROR_CODE.CONFLICT) throw new Error(err.number, "Unique constraint for properties ('StreamId', 'BucketId', 'CommitSequence') failed: (" + err.number + "): " + err.message);
+                if (err.number == ERROR_CODE.CONFLICT) throw new Error(err.number, "<#=this.ErrorCode#> - Unique constraint for properties ('StreamId', 'BucketId', 'CommitSequence') failed: (" + err.number + "): " + err.message);
                 else throw err;
             };
         });

@@ -6,10 +6,12 @@
 
     public partial class DocumentDbUniqueConstraint
     {
+        public string ErrorCode { get; private set; }
         protected readonly IReadOnlyCollection<string> propertyNames;
 
-        public DocumentDbUniqueConstraint(IReadOnlyCollection<string> propertyNames)
+        public DocumentDbUniqueConstraint(IReadOnlyCollection<string> propertyNames, string errorCode)
         {
+            this.ErrorCode = errorCode;
             this.propertyNames = propertyNames;
         }
 
