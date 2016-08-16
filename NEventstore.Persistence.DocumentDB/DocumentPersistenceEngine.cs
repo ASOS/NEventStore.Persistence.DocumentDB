@@ -2,6 +2,7 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Diagnostics;
     using System.Linq;
 
     using Microsoft.Azure.Documents;
@@ -64,38 +65,35 @@
 
         public void Initialize()
         {
+            var triggersToCreate = new List<Trigger>
+            {
+                new Trigger
+                {
+                    Id = "GetFrom_Constraint",
+                    AltLink = "GetFrom_Constraint",
+                    ResourceId = "GetFrom_Constraint",
+                    TriggerOperation = TriggerOperation.All,
+                    TriggerType = TriggerType.Pre,
+                    Body = new DocumentDbUniqueConstraint(new[] { "BucketId", "StreamId", "StartingStreamRevision", "StreamRevision" }, "[GetFromConstraintViolation]").TransformText()
+                },
+                new Trigger
+                {
+                    Id = "CheckPoint_Constraint",
+                    AltLink = "CheckPoint_Constraint",
+                    ResourceId = "CheckPoint_Constraint",
+                    TriggerOperation = TriggerOperation.All,
+                    TriggerType = TriggerType.Post,
+                    Body = new DocumentDbUniqueConstraint(new[] { "CheckpointNumber" }, "[CheckpointConstraintViolation]").TransformText()
+                }
+            };
             this.EnsureDatabaseExists();
             var collections = this.Client.ReadDocumentCollectionFeedAsync(UriFactory.CreateDatabaseUri(this.Options.DatabaseName)).GetAwaiter().GetResult();
-            this.EnsureCollectionExists(collections, this.Options.CommitCollectionName);
+            this.EnsureCollectionExists(collections, this.Options.CommitCollectionName, triggersToCreate);
             this.EnsureCollectionExists(collections, this.Options.StreamHeadCollectionName);
             this.EnsureCollectionExists(collections, this.Options.SnapshotCollectionName);
 
-
             // The reason we're creating one pre and one post trigger here is because of current limitations in the trigger framework as of 04/08/2016.
             // This limitation prevents more than one type of trigger per operation. If more constraints are introduced we'd have to make the T4 template cleverer.
-
-            var getFromConstraint = new Trigger
-            {
-                Id = "GetFrom_Constraint",
-                AltLink = "GetFrom_Constraint",
-                ResourceId = "GetFrom_Constraint",
-                TriggerOperation = TriggerOperation.All,
-                TriggerType = TriggerType.Pre,
-                Body = new DocumentDbUniqueConstraint(new[] { "BucketId", "StreamId", "StartingStreamRevision", "StreamRevision" }, "[GetFromConstraintViolation]").TransformText()
-            };
-
-            var checkPointConstraint = new Trigger
-            {
-                Id = "CheckPoint_Constraint",
-                AltLink = "CheckPoint_Constraint",
-                ResourceId = "CheckPoint_Constraint",
-                TriggerOperation = TriggerOperation.All,
-                TriggerType = TriggerType.Post,
-                Body = new DocumentDbUniqueConstraint(new[] { "CheckpointNumber" }, "[CheckpointConstraintViolation]").TransformText()
-            };
-
-            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), getFromConstraint).GetAwaiter().GetResult();
-            this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), checkPointConstraint).GetAwaiter().GetResult();
         }
 
         public void Drop()
@@ -195,12 +193,18 @@
 
         private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName)
         {
-            if (collections.FirstOrDefault(s => s.Id == collectionName) == null)
-            {
-                var collection = new DocumentCollection { Id = collectionName };
-                collection.IndexingPolicy.IndexingMode = IndexingMode.Consistent;
-                this.Client.CreateDocumentCollectionAsync(UriFactory.CreateDatabaseUri(this.Options.DatabaseName), collection).GetAwaiter().GetResult();
-            }
+            this.EnsureCollectionExists(collections, collectionName, new List<Trigger>());
+        }
+
+
+        private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName, List<Trigger> triggersToCreate)
+        {
+            if (collections.FirstOrDefault(s => s.Id == collectionName) != null) return;
+
+            var collection = new DocumentCollection { Id = collectionName };
+            collection.IndexingPolicy.IndexingMode = IndexingMode.Consistent;
+            this.Client.CreateDocumentCollectionAsync(UriFactory.CreateDatabaseUri(this.Options.DatabaseName), collection).GetAwaiter().GetResult();
+            triggersToCreate.ForEach(t => this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), t));
         }
 
         public IEnumerable<ICommit> GetFrom(string bucketId, DateTime start)
