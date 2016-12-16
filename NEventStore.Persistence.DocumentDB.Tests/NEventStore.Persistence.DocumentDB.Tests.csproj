@@ -88,7 +88,7 @@
     <None Include="Properties\SlowCheetah\SlowCheetah.Transforms.targets" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="..\..\NEventStore\NEventStore.Persistence.MongoDB\dependencies\NEventStore\src\NEventStore.Persistence.AcceptanceTests\NEventStore.Persistence.AcceptanceTests.csproj">
+    <ProjectReference Include="..\Dependencies\NEventStore\src\NEventStore.Persistence.AcceptanceTests\NEventStore.Persistence.AcceptanceTests.csproj">
       <Project>{3fe594fe-16ff-4405-97d5-5a58fb12520b}</Project>
       <Name>NEventStore.Persistence.AcceptanceTests</Name>
     </ProjectReference>
