@@ -19,11 +19,13 @@
         private readonly Func<long> getLastCheckPointNumber;
         private readonly Func<LongCheckpoint> getNextCheckPointNumber;
         private readonly LongCheckpoint checkPointZero;
+        private readonly DocumentClient client;
+        private readonly DocumentPersistenceOptions options;
 
         public DocumentPersistenceEngine(DocumentClient client, DocumentPersistenceOptions options)
         {
-            this.Client = client;
-            this.Options = options;
+            this.client = client;
+            this.options = options;
 
             this.getLastCheckPointNumber = () => this.TryExecute(() =>
             {
@@ -39,27 +41,6 @@
             this.getNextCheckPointNumber = () => new LongCheckpoint(this.getLastCheckPointNumber() + 1L);
             this.checkPointZero = new LongCheckpoint(0);
         }
-
-        private IOrderedQueryable<DocumentCommit> QueryCommits()
-        {
-            return this.Client.CreateDocumentQuery<DocumentCommit>(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName));
-        }
-
-        private IOrderedQueryable<DocumentStreamHead> QueryStreamHeads()
-        {
-            return this.Client.CreateDocumentQuery<DocumentStreamHead>(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName));
-        }
-
-        private IOrderedQueryable<DocumentSnapshot> QuerySnapshots()
-        {
-            return this.Client.CreateDocumentQuery<DocumentSnapshot>(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName));
-        }
-
-        public DocumentClient Client { get; private set; }
-
-        public IDocumentSerializer Serializer { get; private set; }
-
-        public DocumentPersistenceOptions Options { get; private set; }
 
         public bool IsDisposed { get; private set; }
 
@@ -86,42 +67,59 @@
                     Body = new DocumentDbUniqueConstraint(new[] { "CheckpointNumber" }, "[CheckpointConstraintViolation]").TransformText()
                 }
             };
+
             this.EnsureDatabaseExists();
-            var collections = this.Client.ReadDocumentCollectionFeedAsync(UriFactory.CreateDatabaseUri(this.Options.DatabaseName)).GetAwaiter().GetResult();
-            this.EnsureCollectionExists(collections, this.Options.CommitCollectionName, triggersToCreate);
-            this.EnsureCollectionExists(collections, this.Options.StreamHeadCollectionName);
-            this.EnsureCollectionExists(collections, this.Options.SnapshotCollectionName);
+            var collections = this.client.ReadDocumentCollectionFeedAsync(UriFactory.CreateDatabaseUri(this.options.DatabaseName)).GetAwaiter().GetResult();
+            this.EnsureCollectionExists(collections, this.options.CommitCollectionName, triggersToCreate);
+            this.EnsureCollectionExists(collections, this.options.StreamHeadCollectionName);
+            this.EnsureCollectionExists(collections, this.options.SnapshotCollectionName);
 
             // The reason we're creating one pre and one post trigger here is because of current limitations in the trigger framework as of 04/08/2016.
             // This limitation prevents more than one type of trigger per operation. If more constraints are introduced we'd have to make the T4 template cleverer.
         }
 
-        public void Drop()
+        public ICommit Commit(CommitAttempt attempt)
         {
-            this.TryExecute(() =>
+            Logger.Debug(Messages.AttemptingToCommit, attempt.Events.Count, attempt.StreamId, attempt.CommitSequence, attempt.BucketId);
+            return this.TryExecute(() =>
             {
-                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName)).GetAwaiter().GetResult();
-                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName)).GetAwaiter().GetResult();
-                this.Client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName)).GetAwaiter().GetResult();
-            });
-        }
+                var doc = attempt.ToDocumentCommit(this.getNextCheckPointNumber());
 
-        public void DeleteStream(string bucketId, string streamId)
-        {
-            this.TryExecute(() =>
-            {
-                this.QueryCommits()
-                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
-                    .ToList()
-                    .ForEach(s => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.CommitCollectionName, s.Id)).GetAwaiter().GetResult());
-                this.QueryStreamHeads()
-                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
-                    .ToList()
-                    .ForEach(s => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName, s.Id)).GetAwaiter().GetResult());
-                this.QuerySnapshots()
-                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
-                    .ToList()
-                    .ForEach(s => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName, s.Id)).GetAwaiter().GetResult());
+                while (true)
+                {
+                    try
+                    {
+                        var requestOptions = new RequestOptions
+                        {
+                            PreTriggerInclude = new[] { "GetFrom_Constraint" },
+                            PostTriggerInclude = new[] { "CheckPoint_Constraint" }
+                        };
+
+                        this.client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.CommitCollectionName), doc, requestOptions).GetAwaiter().GetResult();
+                        Logger.Debug(Messages.CommitPersisted, attempt.CommitId, attempt.BucketId);
+                        this.SaveStreamHead(attempt.ToDocumentStreamHead());
+                        return doc.ToCommit();
+                    }
+                    catch (DocumentClientException e)
+                    {
+                        if (e.Message.Contains("[CheckpointConstraintViolation]"))
+                        {
+                            doc.CheckpointNumber = this.getNextCheckPointNumber().LongValue;
+                        }
+                        else
+                        {
+                            var savedCommit = this.LoadSavedCommit(attempt);
+
+                            if (savedCommit != null && savedCommit.CommitId == attempt.CommitId)
+                            {
+                                throw new DuplicateCommitException();
+                            }
+
+                            Logger.Debug(Messages.ConcurrentWriteDetected);
+                            throw new ConcurrencyException();
+                        }
+                    }
+                }
             });
         }
 
@@ -152,9 +150,17 @@
             );
         }
 
-        public ICheckpoint GetCheckpoint(string checkpointToken = null)
+        public IEnumerable<ICommit> GetFrom(string bucketId, DateTime start)
         {
-            return LongCheckpoint.Parse(checkpointToken);
+            Logger.Debug(Messages.GettingAllCommitsFrom, start, bucketId);
+
+            return this.TryExecute(() =>
+                this.QueryCommits()
+                    .Where(s => s.BucketId == bucketId && s.CommitStamp.Epoch >= start.ToEpoch())
+                    .OrderBy(s => s.CheckpointNumber)
+                    .ToList()
+                    .Select(c => c.ToCommit())
+            );
         }
 
         public IEnumerable<ICommit> GetFromTo(string bucketId, DateTime start, DateTime end)
@@ -162,11 +168,33 @@
             Logger.Debug(Messages.GettingAllCommitsFromTo, start, end, bucketId);
 
             return this.TryExecute(() =>
-                this.QueryCommits()
-                    .Where(s => s.BucketId == bucketId && s.CommitStamp.Epoch >= start.ToEpoch() && s.CommitStamp.Epoch <= end.ToEpoch())
+                    this.QueryCommits()
+                        .Where(s => s.BucketId == bucketId && s.CommitStamp.Epoch >= start.ToEpoch() && s.CommitStamp.Epoch <= end.ToEpoch())
+                        .ToList()
+                        .Select(c => c.ToCommit())
+            );
+        }
+
+        public IEnumerable<ICommit> GetFrom(string bucketId, string streamId, int minRevision, int maxRevision)
+        {
+            Logger.Debug(Messages.GettingAllCommitsBetween, streamId, bucketId, minRevision, maxRevision);
+
+            return this.TryExecute(() =>
+            {
+                return this.client.CreateDocumentQuery<DocumentCommit>(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.CommitCollectionName))
+                    .Where(s => s.BucketId == bucketId
+                                && s.StreamId == streamId
+                                && s.StreamRevision >= minRevision
+                                && s.StartingStreamRevision <= maxRevision)
+                    .OrderBy(s => s.StartingStreamRevision)
                     .ToList()
-                    .Select(c => c.ToCommit())
-                );
+                    .Select(s => s.ToCommit());
+            });
+        }
+
+        public ICheckpoint GetCheckpoint(string checkpointToken = null)
+        {
+            return LongCheckpoint.Parse(checkpointToken);
         }
 
         public IEnumerable<ICommit> GetUndispatchedCommits()
@@ -184,40 +212,11 @@
 
         private void EnsureDatabaseExists()
         {
-            var databases = this.Client.ReadDatabaseFeedAsync().GetAwaiter().GetResult();
-            if (databases.FirstOrDefault(d => d.Id == this.Options.DatabaseName) == null)
+            var databases = this.client.ReadDatabaseFeedAsync().GetAwaiter().GetResult();
+            if (databases.FirstOrDefault(d => d.Id == this.options.DatabaseName) == null)
             {
-                this.Client.CreateDatabaseAsync(new Database { Id = this.Options.DatabaseName }).GetAwaiter().GetResult();
+                this.client.CreateDatabaseAsync(new Database { Id = this.options.DatabaseName }).GetAwaiter().GetResult();
             }
-        }
-
-        private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName)
-        {
-            this.EnsureCollectionExists(collections, collectionName, new List<Trigger>());
-        }
-
-
-        private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName, List<Trigger> triggersToCreate)
-        {
-            if (collections.FirstOrDefault(s => s.Id == collectionName) != null) return;
-
-            var collection = new DocumentCollection { Id = collectionName };
-            collection.IndexingPolicy.IndexingMode = IndexingMode.Consistent;
-            this.Client.CreateDocumentCollectionAsync(UriFactory.CreateDatabaseUri(this.Options.DatabaseName), collection).GetAwaiter().GetResult();
-            triggersToCreate.ForEach(t => this.Client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), t));
-        }
-
-        public IEnumerable<ICommit> GetFrom(string bucketId, DateTime start)
-        {
-            Logger.Debug(Messages.GettingAllCommitsFrom, start, bucketId);
-
-            return this.TryExecute(() =>
-                this.QueryCommits()
-                    .Where(s => s.BucketId == bucketId && s.CommitStamp.Epoch >= start.ToEpoch())
-                    .OrderBy(s => s.CheckpointNumber)
-                    .ToList()
-                    .Select(c => c.ToCommit())
-            );
         }
 
         public void MarkCommitAsDispatched(ICommit commit)
@@ -231,13 +230,53 @@
             }
 
             documentToUpdate.Dispatched = true;
-            this.Client.ReplaceDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.CommitCollectionName, documentToUpdate.Id), documentToUpdate).GetAwaiter().GetResult();
+            this.client.ReplaceDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, documentToUpdate.Id), documentToUpdate).GetAwaiter().GetResult();
         }
 
+        // This is a very naive way of purging, as it provides no transactional boundary protection.
+        // I'll raise an issue to move this to a server-side stored procedure later.
         public void Purge(string bucketId)
         {
-            Logger.Warn(Messages.PurgingStorage);
+			Logger.Warn(Messages.PurgingStorage);
 
+            
+            this.TryExecute(() =>
+            {
+                this.QueryCommits()
+                .Where(s => s.BucketId == bucketId)
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, d.Id)).GetAwaiter().GetResult());
+
+                this.QueryStreamHeads()
+                .Where(s => s.BucketId == bucketId)
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, d.Id)).GetAwaiter().GetResult());
+
+                this.QuerySnapshots()
+                .Where(s => s.BucketId == bucketId)
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, d.Id)).GetAwaiter().GetResult());
+            });
+        }
+
+        // This is a very naive way of purging, as it provides no transactional boundary protection.
+        // I'll raise an issue to move this to a server-side stored procedure later.
+        public void Purge()
+        {
+            this.TryExecute(() =>
+            {
+                this.QueryCommits()
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, d.Id)).GetAwaiter().GetResult());
+
+                this.QueryStreamHeads()
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.StreamHeadCollectionName, d.Id)).GetAwaiter().GetResult());
+
+                this.QuerySnapshots()
+                .ToList()
+                .ForEach(d => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.SnapshotCollectionName, d.Id)).GetAwaiter().GetResult());
+            });
         }
 
         void IPersistStreams.Drop()
@@ -245,21 +284,32 @@
             this.Drop();
         }
 
-        public void Purge()
+        public void Drop()
+        {
+            this.TryExecute(() =>
+            {
+                this.client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.CommitCollectionName)).GetAwaiter().GetResult();
+                this.client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.SnapshotCollectionName)).GetAwaiter().GetResult();
+                this.client.DeleteDocumentCollectionAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.StreamHeadCollectionName)).GetAwaiter().GetResult();
+            });
+        }
+
+        public void DeleteStream(string bucketId, string streamId)
         {
             this.TryExecute(() =>
             {
                 this.QueryCommits()
-                .ToList()
-                .ForEach(d => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.CommitCollectionName, d.Id)).GetAwaiter().GetResult());
-
+                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
+                    .ToList()
+                    .ForEach(s => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.CommitCollectionName, s.Id)).GetAwaiter().GetResult());
                 this.QueryStreamHeads()
-                .ToList()
-                .ForEach(d => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName, d.Id)).GetAwaiter().GetResult());
-
+                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
+                    .ToList()
+                    .ForEach(s => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.StreamHeadCollectionName, s.Id)).GetAwaiter().GetResult());
                 this.QuerySnapshots()
-                .ToList()
-                .ForEach(d => this.Client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName, d.Id)).GetAwaiter().GetResult());
+                    .Where(s => s.BucketId == bucketId && s.StreamId == streamId)
+                    .ToList()
+                    .ForEach(s => this.client.DeleteDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.SnapshotCollectionName, s.Id)).GetAwaiter().GetResult());
             });
         }
 
@@ -269,77 +319,34 @@
             GC.SuppressFinalize(this);
         }
 
-        protected virtual void Dispose(bool disposing)
+        public IEnumerable<IStreamHead> GetStreamsToSnapshot(string bucketId, int maxThreshold)
         {
-            if (!disposing || this.IsDisposed)
-            {
-                return;
-            }
-
-            Logger.Debug(Messages.ShuttingDownPersistence);
-            this.Client.Dispose();
-            this.IsDisposed = true;
-        }
-
-        public ICommit Commit(CommitAttempt attempt)
-        {
-            Logger.Debug(Messages.AttemptingToCommit, attempt.Events.Count, attempt.StreamId, attempt.CommitSequence, attempt.BucketId);
+            Logger.Debug(Messages.GettingStreamsToSnapshot);
             return this.TryExecute(() =>
             {
-                var doc = attempt.ToDocumentCommit(this.getNextCheckPointNumber());
-
-                while (true)
-                {
-                    try
-                    {
-                        var requestOptions = new RequestOptions
-                        {
-                            PreTriggerInclude = new[] { "GetFrom_Constraint" },
-                            PostTriggerInclude = new[] { "CheckPoint_Constraint" }
-                        };
-
-                        this.Client.CreateDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName), doc, requestOptions).GetAwaiter().GetResult();
-                        Logger.Debug(Messages.CommitPersisted, attempt.CommitId, attempt.BucketId);
-                        this.SaveStreamHead(attempt.ToDocumentStreamHead());
-                        return doc.ToCommit();
-                    }
-                    catch (DocumentClientException e)
-                    {
-                        if (e.Message.Contains("[CheckpointConstraintViolation]"))
-                        {
-                            doc.CheckpointNumber = this.getNextCheckPointNumber().LongValue;
-                        }
-                        else
-                        {
-                            var savedCommit = this.LoadSavedCommit(attempt);
-
-                            if (savedCommit != null && savedCommit.CommitId == attempt.CommitId)
-                            {
-                                throw new DuplicateCommitException();
-                            }
-
-                            Logger.Debug(Messages.ConcurrentWriteDetected);
-                            throw new ConcurrencyException();
-                        }
-                    }
-                }
+                return this.QueryStreamHeads()
+                           .Where(s => s.SnapshotAge >= maxThreshold)
+                           .OrderByDescending(s => s.SnapshotAge)
+                           .ToList()
+                           .Select(s => s.ToStreamHead());
             });
         }
 
-        public IEnumerable<ICommit> GetFrom(string bucketId, string streamId, int minRevision, int maxRevision)
+        public ISnapshot GetSnapshot(string bucketId, string streamId, int maxRevision)
         {
-            Logger.Debug(Messages.GettingAllCommitsBetween, streamId, bucketId, minRevision, maxRevision);
+            Logger.Debug(Messages.GettingRevision, streamId, maxRevision);
 
             return this.TryExecute(() =>
             {
-                return this.Client.CreateDocumentQuery<DocumentCommit>(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.CommitCollectionName))
-                    .Where(s => s.BucketId == bucketId
-                                && s.StreamId == streamId
-                                && s.StreamRevision >= minRevision
-                                && s.StartingStreamRevision <= maxRevision)
-                    .OrderBy(s => s.StartingStreamRevision)
-                    .ToList()
-                    .Select(s => s.ToCommit());
+                return this.QuerySnapshots()
+                           .Where(s => s.BucketId == bucketId
+                                       && s.StreamId == streamId
+                                       && s.StreamRevision > 0
+                                       && s.StreamRevision <= maxRevision)
+                           .OrderByDescending(s => s.SnapshotId)
+                           .ToList()
+                           .Select(d => d.ToSnapshot())
+                           .FirstOrDefault();
             });
         }
 
@@ -355,10 +362,10 @@
             {
                 var snapshotToUpdate = snapshot.ToDocumentSnapshot();
 
-                this.Client.UpsertDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.SnapshotCollectionName), snapshotToUpdate).GetAwaiter().GetResult();
+                this.client.UpsertDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.SnapshotCollectionName), snapshotToUpdate).GetAwaiter().GetResult();
                 var streamHeadToUpdate = this.QueryStreamHeads().Where(s => s.BucketId == snapshot.BucketId && s.StreamId == snapshot.StreamId).ToList().First();
                 streamHeadToUpdate.SnapshotRevision = snapshot.StreamRevision;
-                this.Client.ReplaceDocumentAsync(UriFactory.CreateDocumentUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName, streamHeadToUpdate.Id), streamHeadToUpdate).GetAwaiter().GetResult();
+                this.client.ReplaceDocumentAsync(UriFactory.CreateDocumentUri(this.options.DatabaseName, this.options.StreamHeadCollectionName, streamHeadToUpdate.Id), streamHeadToUpdate).GetAwaiter().GetResult();
                 return true;
             }
             catch (Exception)
@@ -367,35 +374,16 @@
             }
         }
 
-        public ISnapshot GetSnapshot(string bucketId, string streamId, int maxRevision)
+        protected virtual void Dispose(bool disposing)
         {
-            Logger.Debug(Messages.GettingRevision, streamId, maxRevision);
-
-            return this.TryExecute(() =>
+            if (!disposing || this.IsDisposed)
             {
-                return this.QuerySnapshots()
-                    .Where(s => s.BucketId == bucketId
-                                && s.StreamId == streamId
-                                && s.StreamRevision > 0
-                                && s.StreamRevision <= maxRevision)
-                    .OrderByDescending(s => s.SnapshotId)
-                    .ToList()
-                    .Select(d => d.ToSnapshot())
-                    .FirstOrDefault();
-            });
-        }
+                return;
+            }
 
-        public IEnumerable<IStreamHead> GetStreamsToSnapshot(string bucketId, int maxThreshold)
-        {
-            Logger.Debug(Messages.GettingStreamsToSnapshot);
-            return this.TryExecute(() =>
-            {
-                return this.QueryStreamHeads()
-                    .Where(s => s.SnapshotAge >= maxThreshold)
-                    .OrderByDescending(s => s.SnapshotAge)
-                    .ToList()
-                    .Select(s => s.ToStreamHead());
-            });
+            Logger.Debug(Messages.ShuttingDownPersistence);
+            this.client.Dispose();
+            this.IsDisposed = true;
         }
 
         protected virtual T TryExecute<T>(Func<T> callback)
@@ -431,6 +419,21 @@
             }
         }
 
+        private IOrderedQueryable<DocumentCommit> QueryCommits()
+        {
+            return this.client.CreateDocumentQuery<DocumentCommit>(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.CommitCollectionName));
+        }
+
+        private IOrderedQueryable<DocumentStreamHead> QueryStreamHeads()
+        {
+            return this.client.CreateDocumentQuery<DocumentStreamHead>(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.StreamHeadCollectionName));
+        }
+
+        private IOrderedQueryable<DocumentSnapshot> QuerySnapshots()
+        {
+            return this.client.CreateDocumentQuery<DocumentSnapshot>(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.SnapshotCollectionName));
+        }
+
         private DocumentCommit LoadSavedCommit(CommitAttempt attempt)
         {
             Logger.Debug(Messages.DetectingConcurrency);
@@ -450,7 +453,7 @@
         {
             this.TryExecute(() =>
             {
-                var documents = this.Client.ReadDocumentFeedAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName)).GetAwaiter().GetResult();
+                var documents = this.client.ReadDocumentFeedAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.StreamHeadCollectionName)).GetAwaiter().GetResult();
                 var documentId = DocumentStreamHead.GetStreamHeadId(updated.BucketId, updated.StreamId);
 
                 DocumentStreamHead streamHead = documents.FirstOrDefault(d => d.Id == documentId) ?? updated;
@@ -462,8 +465,23 @@
                     streamHead.SnapshotRevision = updated.SnapshotRevision;
                 }
 
-                return this.Client.UpsertDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.Options.DatabaseName, this.Options.StreamHeadCollectionName), streamHead).Result;
+                return this.client.UpsertDocumentAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.StreamHeadCollectionName), streamHead).Result;
             });
+        }
+
+        private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName, List<Trigger> triggersToCreate)
+        {
+            if (collections.FirstOrDefault(s => s.Id == collectionName) != null) return;
+
+            var collection = new DocumentCollection { Id = collectionName };
+            collection.IndexingPolicy.IndexingMode = IndexingMode.Consistent;
+            this.client.CreateDocumentCollectionAsync(UriFactory.CreateDatabaseUri(this.options.DatabaseName), collection).GetAwaiter().GetResult();
+            triggersToCreate.ForEach(t => this.client.CreateTriggerAsync(UriFactory.CreateDocumentCollectionUri(this.options.DatabaseName, this.options.CommitCollectionName), t));
+        }
+
+        private void EnsureCollectionExists(FeedResponse<DocumentCollection> collections, string collectionName)
+        {
+            this.EnsureCollectionExists(collections, collectionName, new List<Trigger>());
         }
     }
 }
